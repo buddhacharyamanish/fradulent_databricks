@@ -1,0 +1,31 @@
+{
+  "pipeline_name": "kafka_cdc_bronze_ingestion",
+  "version": "1.0.0",
+  "source": {
+    "type": "kafka",
+    "bootstrap_servers": "34.228.32.86:9092",
+    "topic": "frauddb.frauddb.activity_log",
+    "starting_offsets": "earliest",
+    "fail_on_data_loss": false,
+    "max_offsets_per_trigger": 50000
+  },
+  "target": {
+    "catalog": "fradulenttransactionmonitoring",
+    "schema": "bronze",
+    "table": "activity_log_staging",
+    "format": "delta",
+    "checkpoint_volume": "/Volumes/fradulenttransactionmonitoring/bronze/fraud_checkpoints",
+    "checkpoint_path": "/Volumes/fradulenttransactionmonitoring/bronze/fraud_checkpoints/activity_log_staging",
+    "checkpoint_adls_fallback": "abfss://fradulentmonitoring-data@fradulentmonitoring.dfs.core.windows.net/managed/fradulenttrans/__unitystorage/catalogs/e7a88158-390b-4e72-b46e-09e1b2b85ff3/volumes/946c33ce-85da-4426-a020-82a1d06d7cd3/activity_log_staging",
+    "trigger_mode": "availableNow"
+  },
+  "metadata_governance": {
+    "auto_create_catalog_schema": true,
+    "auto_create_table": true,
+    "auto_add_missing_columns": true,
+    "merge_schema": true,
+    "include_raw_payload": true,
+    "include_cdc_metadata": true,
+    "include_kafka_metadata": true
+  }
+}

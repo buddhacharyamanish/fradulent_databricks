@@ -1,0 +1,161 @@
+# ======================================================================================
+# Databricks Asset Bundle (DAB) Configuration: cdc-pipeline
+# ======================================================================================
+# This bundle defines declarative infrastructure-as-code for deploying and running the
+# metadata-driven Kafka CDC Ingestion Pipeline on Azure Databricks.
+#
+# Key Features:
+#   - Parameterized Variables: Enables reusability across dev, staging, and prod.
+#   - Continuous Streaming: Configured with `continuous.pause_status: UNPAUSED` to keep
+#     the ingestion stream perpetually running for 24/7 real-time fraud monitoring.
+#   - Reliable Single-Node Compute: Uses `Standard_D2ds_v6` with 0 workers (SingleNode)
+#     to ensure fast startup times and avoid Azure Australia East DS3_v2 capacity stockouts.
+# ======================================================================================
+
+bundle:
+  name: cdc-pipeline
+
+# --------------------------------------------------------------------------------------
+# Bundle Variables (Parameterized Settings with Defaults)
+# --------------------------------------------------------------------------------------
+variables:
+  catalog:
+    description: "Target Unity Catalog name"
+    default: fradulenttransactionmonitoring
+  schema:
+    description: "Target Unity Catalog schema/database name"
+    default: bronze
+  table:
+    description: "Target Delta Lake table name"
+    default: activity_log_staging
+  kafka_bootstrap_servers:
+    description: "Kafka bootstrap broker list (host:port)"
+    default: 34.228.32.86:9092
+  kafka_topic:
+    description: "Upstream Kafka topic containing CDC events"
+    default: frauddb.frauddb.activity_log
+  trigger_mode:
+    description: "Stream trigger mode interval (e.g. '10 seconds' or 'availableNow')"
+    default: "10 seconds"
+
+# --------------------------------------------------------------------------------------
+# Target Environments (Deploy to dev or prod via: databricks bundle deploy -t <target>)
+# --------------------------------------------------------------------------------------
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405614077087945.5.azuredatabricks.net
+
+  prod:
+    mode: production
+    workspace:
+      host: https://adb-7405614077087945.5.azuredatabricks.net
+      root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
+
+
+# --------------------------------------------------------------------------------------
+# Resources: Databricks Workflow Job Definitions
+# --------------------------------------------------------------------------------------
+resources:
+  jobs:
+    # ----------------------------------------------------------------------------------
+    # 1. Main Streaming CDC Ingestion Job (Two-Stage Gatekept DAG)
+    # Step 1: Lightweight Serverless Pre-Flight Task (0 Azure VM cores, 0 wait time).
+    # Step 2: Dedicated Streaming Ingestion - Starts ONLY if Step 1 passes!
+    # ----------------------------------------------------------------------------------
+    mysql_cdc_stream:
+      name: mysql-cdc-stream
+      max_concurrent_runs: 1
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+      tasks:
+        # Step 1: Lightweight Serverless Pre-Flight Task
+        - task_key: preflight
+          spark_python_task:
+            python_file: ./src/preflight_task.py
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema
+              - ${var.schema}
+              - --table
+              - ${var.table}
+              - --bootstrap-servers
+              - ${var.kafka_bootstrap_servers}
+              - --topic
+              - ${var.kafka_topic}
+          environment_key: default
+
+        # Step 2: Dedicated Streaming Ingestion (Starts ONLY if preflight passes)
+        - task_key: stream
+          depends_on:
+            - task_key: preflight
+          spark_python_task:
+            python_file: ./src/main.py
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema
+              - ${var.schema}
+              - --table
+              - ${var.table}
+              - --bootstrap-servers
+              - ${var.kafka_bootstrap_servers}
+              - --topic
+              - ${var.kafka_topic}
+              - --trigger-mode
+              - ${var.trigger_mode}
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: Standard_D2ds_v6
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+
+    # ----------------------------------------------------------------------------------
+    # 2. Separate Lightweight Pre-Flight Readiness Job
+    # - Step 1: Runs on lightweight Serverless Compute (0 Azure VM cores, 0 startup lag).
+    # - Step 2: Streaming compute starts ONLY if Step 1 (pre-flight checks) pass!
+    # ----------------------------------------------------------------------------------
+    # Not is use for now...
+    mysql_cdc_preflight:
+      name: mysql-cdc-preflight
+      max_concurrent_runs: 1
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+      tasks:
+        # Step 1: Lightweight pre-flight check on Serverless compute
+        - task_key: preflight_check
+          spark_python_task:
+            python_file: ./src/preflight_task.py
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema
+              - ${var.schema}
+              - --table
+              - ${var.table}
+              - --bootstrap-servers
+              - ${var.kafka_bootstrap_servers}
+              - --topic
+              - ${var.kafka_topic}
+          environment_key: default
+
+        # Step 2: Triggers streaming compute ONLY if preflight_check succeeds
+        - task_key: start_stream
+          depends_on:
+            - task_key: preflight_check
+          run_job_task:
+            job_id: ${resources.jobs.mysql_cdc_stream.id}
+
+
